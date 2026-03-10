@@ -3,7 +3,7 @@
 即梦 AI 免费 API 服务 - 支持文生图、图生图、视频生成的 OpenAI 兼容接口
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Version](https://img.shields.io/badge/version-v0.8.3-green.svg)
+![Version](https://img.shields.io/badge/version-v0.8.6-green.svg)
 ![Node](https://img.shields.io/badge/node-%3E%3D16.0.0-brightgreen.svg)
 ![Docker](https://img.shields.io/badge/docker-ready-blue.svg)
 
@@ -13,14 +13,14 @@
 
 ### 项目概述
 
-Jimeng AI Free API 是一个逆向工程的 API 服务器，将即梦 AI（Jimeng AI）的图像和视频生成能力封装为 OpenAI 兼容的 API 接口。支持最新的 **jimeng-5.0-preview**、**jimeng-4.6** 文生图模型、**Seedance 2.0 多图智能视频生成**（模型名 `jimeng-video-seedance-2.0`）及 **Seedance 2.0-fast 快速版**（模型名 `jimeng-video-seedance-2.0-fast`），零配置部署，多路 token 支持。
+Jimeng AI Free API 是一个逆向工程的 API 服务器，将即梦 AI（Jimeng AI）的图像和视频生成能力封装为 OpenAI 兼容的 API 接口。支持最新的 **jimeng-5.0**、**jimeng-4.6** 文生图模型、**Seedance 2.0 多模态智能视频生成**（模型名 `jimeng-video-seedance-2.0`，支持图片/视频/音频混合上传）及 **Seedance 2.0-fast 快速版**（模型名 `jimeng-video-seedance-2.0-fast`），零配置部署，多路 token 支持。
 
 ### 核心功能
 
-- 🖼️ **文生图**：支持 jimeng-5.0-preview、jimeng-4.6、jimeng-4.5 等多款模型，最高 4K 分辨率
+- 🖼️ **文生图**：支持 jimeng-5.0、jimeng-4.6、jimeng-4.5 等多款模型，最高 4K 分辨率
 - 🎭 **图生图**：多图合成，支持 1-10 张输入图片
 - 🎬 **视频生成**：jimeng-video-3.5-pro 等模型，支持首帧/尾帧控制
-- 🌊 **Seedance 2.0 / 2.0-fast**：多图智能视频生成，支持 @1、@2 占位符引用图片，fast 版本生成更快
+- 🌊 **Seedance 2.0 / 2.0-fast**：多模态智能视频生成，支持图片/视频/音频混合上传，@1、@2 占位符引用素材，fast 版本生成更快
 - 🔗 **OpenAI 兼容**：完全兼容 OpenAI API 格式，无缝对接现有客户端
 - 🔄 **多账号支持**：支持多个 sessionid 轮询使用
 
@@ -28,21 +28,23 @@ Jimeng AI Free API 是一个逆向工程的 API 服务器，将即梦 AI（Jimen
 
 | 技术 | 版本 | 用途 |
 |------|------|------|
-| Node.js | ≥16.0.0 | 运行环境 |
+| Node.js | >=16.0.0 | 运行环境 |
 | TypeScript | ^5.0.0 | 开发语言 |
 | Koa | ^2.15.0 | Web 框架 |
+| Playwright | ^1.49.0 | 浏览器代理（Seedance 反爬绕过） |
 | Docker | latest | 容器化部署 |
 
 ## 功能清单
 
 | 功能名称 | 功能说明 | 模型 | 状态 |
 |---------|---------|------|------|
-| 文生图 | 根据文本描述生成图片 | jimeng-5.0-preview, jimeng-4.6, jimeng-4.5, jimeng-4.1 等 | ✅ 可用 |
-| 图生图 | 多图合成生成新图片 | jimeng-5.0-preview, jimeng-4.6, jimeng-4.5 等 | ✅ 可用 |
+| 文生图 | 根据文本描述生成图片 | jimeng-5.0, jimeng-4.6, jimeng-4.5, jimeng-4.1 等 | ✅ 可用 |
+| 图生图 | 多图合成生成新图片 | jimeng-5.0, jimeng-4.6, jimeng-4.5 等 | ✅ 可用 |
 | 文生视频 | 根据文本描述生成视频 | jimeng-video-3.5-pro 等 | ✅ 可用 |
 | 图生视频 | 使用首帧/尾帧图片生成视频 | jimeng-video-3.0 等 | ✅ 可用 |
-| 多图智能视频 | Seedance 2.0 多图混合生成 | jimeng-video-seedance-2.0, seedance-2.0 | ✅ 可用 |
+| 多图智能视频 | Seedance 2.0 多模态混合生成 | jimeng-video-seedance-2.0, seedance-2.0 | ✅ 可用 |
 | 多图快速视频 | Seedance 2.0-fast 快速生成 | jimeng-video-seedance-2.0-fast, seedance-2.0-fast | ✅ 可用 |
+| 音频驱动视频 | Seedance 图片+音频混合生成 | jimeng-video-seedance-2.0, seedance-2.0-fast | ✅ 可用 |
 | Chat 接口 | OpenAI 兼容的对话接口 | 所有模型 | ✅ 可用 |
 
 ## 免责声明
@@ -61,6 +63,7 @@ Jimeng AI Free API 是一个逆向工程的 API 服务器，将即梦 AI（Jimen
 
 - Node.js 16+
 - npm 或 yarn
+- Chromium 浏览器（Seedance 模型需要，通过 Playwright 自动管理）
 - Docker（可选）
 
 ### 方式一：Docker 部署（推荐）
@@ -109,6 +112,9 @@ cd jimeng-free-api-all
 # 安装依赖
 npm install
 
+# 安装 Chromium 浏览器（Seedance 模型需要）
+npx playwright-core install chromium --with-deps
+
 # 开发模式
 npm run dev
 
@@ -142,8 +148,8 @@ Authorization: Bearer sessionid1,sessionid2,sessionid3
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/v1/chat/completions` | POST | OpenAI 兼容的对话接口 |
-| `/v1/images/generations` | POST | 文生图接口 |
-| `/v1/images/compositions` | POST | 图生图接口 |
+| `/v1/images/generations` | POST | 文生图/图生图接口（支持 images 可选参数） |
+| `/v1/images/compositions` | POST | 图生图接口（向后兼容） |
 | `/v1/videos/generations` | POST | 视频生成接口 |
 | `/v1/models` | GET | 获取模型列表 |
 
@@ -160,6 +166,25 @@ curl -X POST http://localhost:8000/v1/images/generations \
     "prompt": "美丽的日落风景，湖边的小屋",
     "ratio": "16:9",
     "resolution": "2k"
+  }'
+```
+
+**图生图示例（通过 images 参数）：**
+
+```bash
+curl -X POST http://localhost:8000/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your_sessionid" \
+  -d '{
+    "model": "jimeng-4.5",
+    "prompt": "将两张图融合成梦幻风格",
+    "images": [
+      "https://example.com/img1.jpg",
+      "https://example.com/img2.jpg"
+    ],
+    "ratio": "1:1",
+    "resolution": "2k",
+    "sample_strength": 0.5
   }'
 ```
 
@@ -203,6 +228,19 @@ curl -X POST http://localhost:8000/v1/videos/generations \
   -F "files=@/path/to/image1.jpg"
 ```
 
+**Seedance 图片+音频混合示例：**
+
+```bash
+curl -X POST http://localhost:8000/v1/videos/generations \
+  -H "Authorization: Bearer your_sessionid" \
+  -F "model=jimeng-video-seedance-2.0-fast" \
+  -F "prompt=@1 图片中的人物随着音乐 @2 开始跳舞" \
+  -F "ratio=9:16" \
+  -F "duration=5" \
+  -F "files=@/path/to/image.png" \
+  -F "files=@/path/to/audio.wav"
+```
+
 ## 项目结构
 
 ```
@@ -225,6 +263,7 @@ jimeng-free-api-all/
 │   │   └── consts/              # API 常量和异常
 │   └── lib/
 │       ├── server.ts            # Koa 服务器配置
+│       ├── browser-service.ts   # 浏览器代理服务（Seedance 反爬）
 │       ├── config.ts            # 配置管理
 │       ├── logger.ts            # 日志工具
 │       ├── util.ts              # 辅助工具
@@ -245,7 +284,7 @@ jimeng-free-api-all/
 
 | 用户模型名 | 内部模型名 | 说明 |
 |-----------|-----------|------|
-| `jimeng-5.0-preview` | `high_aes_general_v50` | 5.0 预览版，最新模型 |
+| `jimeng-5.0` | `high_aes_general_v50` | 5.0 正式版，最新模型 |
 | `jimeng-4.6` | `high_aes_general_v42` | 最新模型，推荐使用 |
 | `jimeng-4.5` | `high_aes_general_v40l` | 高质量模型 |
 | `jimeng-4.1` | `high_aes_general_v41` | 高质量模型 |
@@ -293,23 +332,34 @@ jimeng-free-api-all/
 
 ## API 详细文档
 
-### 文生图接口
+### 图像生成接口
 
 **POST /v1/images/generations**
+
+统一接口，支持文生图和图生图两种模式：
 
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | model | string | 否 | jimeng-4.5 | 模型名称 |
 | prompt | string | 是 | - | 提示词，支持多图生成 |
+| images | array | 否 | - | 图片URL数组（1-10张），提供则走图生图模式，不提供则走文生图模式 |
 | negative_prompt | string | 否 | "" | 反向提示词 |
 | ratio | string | 否 | 1:1 | 宽高比 |
 | resolution | string | 否 | 2k | 分辨率：1k, 2k, 4k |
 | sample_strength | number | 否 | 0.5 | 精细度 0-1 |
 | response_format | string | 否 | url | url 或 b64_json |
 
-### 图生图接口
+**说明：**
+- 当 `images` 参数为空或不提供时，接口执行文生图功能
+- 当 `images` 参数提供（1-10张图片）时，接口执行图生图功能
+- 支持 `application/json`（images 为 URL 数组）和 `multipart/form-data`（通过 images 字段上传文件）两种请求格式
+- 图生图模式下，响应会额外包含 `input_images` 和 `composition_type` 字段
+
+### 图生图接口（向后兼容）
 
 **POST /v1/images/compositions**
+
+保留此接口以确保向后兼容，功能与 `/v1/images/generations` 提供 `images` 参数时相同。
 
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
@@ -339,15 +389,20 @@ jimeng-free-api-all/
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | model | string | 是 | - | jimeng-video-seedance-2.0（推荐）、jimeng-video-seedance-2.0-fast（快速版）或 seedance-2.0 |
-| prompt | string | 否 | - | 提示词，使用 @1、@2 引用图片 |
+| prompt | string | 否 | - | 提示词，使用 @1、@2 引用素材（图片/视频/音频） |
 | ratio | string | 否 | 4:3 | 宽高比 |
 | duration | number | 否 | 4 | 视频时长 4-15 秒 |
-| files | file[] | 是* | - | 上传的图片（multipart） |
-| file_paths | array | 是* | - | 图片URL数组（JSON） |
+| files | file[] | 是* | - | 上传的素材文件（图片/视频/音频，multipart） |
+| file_paths | array | 是* | - | 素材URL数组（JSON） |
+
+**支持的素材类型：**
+- 图片：jpg, png, webp, gif, bmp
+- 视频：mp4, mov, m4v
+- 音频：mp3, wav
 
 **提示词占位符：**
-- `@1` / `@图1` / `@image1` - 引用第一张图片
-- `@2` / `@图2` / `@image2` - 引用第二张图片
+- `@1` / `@图1` / `@image1` - 引用第一个素材
+- `@2` / `@图2` / `@image2` - 引用第二个素材
 
 ## 效果展示
 
@@ -372,6 +427,9 @@ cd jimeng-free-api-all
 
 # 安装依赖
 npm install
+
+# 安装 Chromium 浏览器（首次开发需要）
+npx playwright-core install chromium --with-deps
 
 # 开发模式（热重载）
 npm run dev
@@ -443,7 +501,43 @@ Authorization: Bearer sessionid1,sessionid2,sessionid3
 
 </details>
 
+<details>
+<summary>Seedance 视频生成报 "shark not pass" 错误？</summary>
+
+该错误表示即梦的 shark 安全中间件拦截了请求。v0.8.4 已通过 Playwright 浏览器代理解决此问题。请确保：
+
+1. 已安装 Chromium 浏览器：`npx playwright-core install chromium --with-deps`
+2. Docker 用户请使用 v0.8.4 及以上版本的镜像，Dockerfile 已内置 Chromium 支持
+3. 首次 Seedance 请求会自动启动浏览器（约数秒），后续请求复用会话
+
+</details>
+
 ## 更新日志
+
+### v0.8.6 (2026-02-20) - jimeng-5.0 正式版模型更新
+
+- 🔄 **模型更名 `jimeng-5.0-preview` → `jimeng-5.0`**：即梦平台已将 5.0 预览版升级为正式版，移除 `-preview` 后缀
+- 🔧 **更新模型配置**：同步更新 `MODEL_MAP`、`MODEL_DRAFT_VERSIONS`、`MODEL_CONFIGS` 中的模型名映射
+- 🔧 **更新模型列表接口**：`/v1/models` 返回的模型 ID 和描述信息同步更新
+
+### v0.8.5 (2026-02-20) - Seedance 多模态素材支持（图片/视频/音频混合上传）
+
+- ✨ **Seedance 多模态素材上传**：支持图片、视频、音频混合上传，通过 MIME 类型和文件扩展名自动检测素材类型
+- ✨ **VOD 上传通道**：音频/视频文件通过 ByteDance VOD API 上传（`ApplyUploadInner` → Upload → `CommitUploadInner`），获取真实 VOD vid
+- ✨ **音频时长解析**：VOD 服务自动解析音频时长，兜底支持 WAV 文件头解析
+- 🔧 **AWS 签名增强**：`createSignature` 支持自定义 `region` 和 `service` 参数，支持 ImageX（`imagex`）和 VOD（`vod`）双通道签名
+- 🔧 **上传令牌分离**：图片上传使用 `scene: 2`（ImageX），音频/视频上传使用 `scene: 1`（VOD，`spaceName=dreamina`）
+- 📝 **支持的素材格式**：图片（jpg/png/webp/gif/bmp）、视频（mp4/mov/m4v）、音频（mp3/wav）
+
+### v0.8.4 (2026-02-18) - 修复 Seedance "shark not pass" 反爬拦截
+
+- 🐛 **修复 Seedance 视频生成被 shark 安全中间件拦截**：即梦对 `/mweb/v1/aigc_draft/generate` 接口新增 `a_bogus` 签名校验，Node.js 直接请求返回 `ret=1019, "shark not pass"`
+- ✨ **新增 BrowserService 浏览器代理服务**：通过 Playwright 启动 headless Chromium，利用字节跳动 `bdms` SDK 在浏览器中自动注入 `a_bogus` 签名
+- 🔧 **仅 Seedance generate 请求走浏览器代理**：其他请求（图片生成、普通视频、上传、轮询、积分查询）不受影响，继续用 Node.js 直接请求
+- ⚡ **懒启动与会话复用**：首次 Seedance 请求才启动浏览器，每个 sessionId 独立会话，10 分钟空闲自动清理
+- 🔧 **资源优化**：浏览器屏蔽图片/字体/CSS 等无关资源，仅加载 bdms SDK 相关脚本（白名单域名：vlabstatic.com、bytescm.com、jianying.com）
+- 🐳 **Docker 支持更新**：Dockerfile 改用 `node:lts`（非 alpine），内置 Chromium 系统依赖和浏览器安装
+- 📦 **新增依赖**：`playwright-core ^1.49.0`
 
 ### v0.8.3 (2026-02-14) - 修复 Seedance 2.0-fast 积分扣减失败
 
@@ -467,9 +561,9 @@ Authorization: Bearer sessionid1,sessionid2,sessionid3
 - ⏱️ **扩展 Seedance 时长支持**：从固定 4 秒扩展为 4-15 秒连续范围
 - 🔧 **更新 Draft 版本**：Seedance 模型 Draft 版本从 `3.3.9` 调整为 `3.3.8`
 
-### v0.8.0 (2026-02-09) - 新增 jimeng-5.0-preview 和 jimeng-4.6 图像生成模型
+### v0.8.0 (2026-02-09) - 新增 jimeng-5.0-preview（现已更名为 jimeng-5.0）和 jimeng-4.6 图像生成模型
 
-- ✨ **新增 jimeng-5.0-preview 模型**：即梦 AI 最新 5.0 预览版图像生成模型（内部模型 `high_aes_general_v50`），支持文生图、图生图和多图生成
+- ✨ **新增 jimeng-5.0-preview 模型**：即梦 AI 最新 5.0 预览版图像生成模型（内部模型 `high_aes_general_v50`），v0.8.6 已更名为 `jimeng-5.0`
 - ✨ **新增 jimeng-4.6 模型**：即梦 AI 4.6 版图像生成模型（内部模型 `high_aes_general_v42`），支持文生图、图生图和多图生成
 - ⚡ **升级 Draft 版本**：jimeng-5.0-preview 和 jimeng-4.6 使用最新 `3.3.9` 版本
 - 🔧 **扩展多图生成支持**：多图检测正则匹配扩展至 jimeng-5.x 系列模型
@@ -516,7 +610,7 @@ Authorization: Bearer sessionid1,sessionid2,sessionid3
 
 欢迎加入技术交流群，分享使用心得：
 
-![技术交流群](https://mypicture-1258720957.cos.ap-nanjing.myqcloud.com/Screenshot_20260210_085255_com.tencent.mm.jpg)
+![技术交流群](https://mypicture-1258720957.cos.ap-nanjing.myqcloud.com/Obsidian/%E5%BE%AE%E4%BF%A1%E5%9B%BE%E7%89%87_20260303214419_166_292.jpg)
 
 ## 作者联系
 
