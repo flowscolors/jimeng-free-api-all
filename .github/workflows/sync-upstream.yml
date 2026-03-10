@@ -49,10 +49,9 @@ jobs:
 
           git checkout "$DEFAULT_BRANCH"
 
-          # 仅允许 fast-forward，避免覆盖 fork 上的独立提交
-          git merge --ff-only "upstream/${DEFAULT_BRANCH}" || {
-            echo "Fast-forward failed: local branch has diverged from upstream." >&2
-            echo "Please resolve manually (rebase/merge) then rerun workflow." >&2
+          # fork 与 upstream 分叉时，尝试自动 merge；有冲突则失败并提示人工处理
+          git merge --no-edit "upstream/${DEFAULT_BRANCH}" || {
+            echo "Auto-merge failed due to conflicts. Please resolve manually, then rerun." >&2
             exit 1
           }
 
