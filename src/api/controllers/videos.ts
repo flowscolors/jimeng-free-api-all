@@ -1,6 +1,7 @@
 import _ from "lodash";
 import crypto from "crypto";
 import fs from "fs";
+import path from "path";
 
 import APIException from "@/lib/exceptions/APIException.ts";
 import EX from "@/api/consts/exceptions.ts";
@@ -1308,7 +1309,7 @@ export async function generateVideo(
   // 轮询获取结果
   let status = 20, failCode, item_list = [];
   let retryCount = 0;
-  const maxRetries = 60; // 增加重试次数，支持约20分钟的总重试时间
+  const maxRetries = 120; // 支持较长的视频生成时间（约20分钟以上）
   
   // 首次查询前等待更长时间，让服务器有时间处理请求
   await new Promise((resolve) => setTimeout(resolve, 5000));
@@ -1835,7 +1836,7 @@ export async function generateSeedanceVideo(
   // 轮询获取结果（与普通视频相同的逻辑）
   let status = 20, failCode, item_list = [];
   let retryCount = 0;
-  const maxRetries = 60;
+  const maxRetries = 120;
 
   await new Promise((resolve) => setTimeout(resolve, 5000));
 
@@ -2000,4 +2001,948 @@ function buildMetaListFromPrompt(prompt: string, materials: Array<{ type: Seedan
   }
 
   return metaList;
+}
+
+/**
+ * 独立的视频结果轮询函数
+ * 用于继续轮询已有的 historyId，适用于任务恢复场景
+ *
+ * @param historyId 即梦平台的 history_record_id
+ * @param refreshToken 刷新令牌
+ * @param maxRetries 最大重试次数（默认120次）
+ * @returns 视频URL
+ */
+async function pollVideoResult(
+  historyId: string,
+  refreshToken: string,
+  maxRetries: number = 120
+): Promise<string> {
+  let status = 20, failCode, item_list = [];
+  let retryCount = 0;
+
+  logger.info(`轮询视频结果: historyId=${historyId}, maxRetries=${maxRetries}`);
+
+  while (status === 20 && retryCount < maxRetries) {
+    try {
+      const result = await request("post", "/mweb/v1/get_history_by_ids", refreshToken, {
+        data: { history_ids: [historyId] },
+      });
+
+      const responseStr = JSON.stringify(result);
+      logger.info(`轮询响应摘要: ${responseStr.substring(0, 300)}...`);
+
+      let historyData = result.history_list?.[0] || result[historyId];
+
+      if (!historyData) {
+        retryCount++;
+        const waitTime = Math.min(2000 * (retryCount + 1), 30000);
+        logger.info(`历史记录未找到，等待 ${waitTime}ms 后重试 (${retryCount}/${maxRetries})`);
+        await new Promise((resolve) => setTimeout(resolve, waitTime));
+        continue;
+      }
+
+      status = historyData.status;
+      failCode = historyData.fail_code;
+      item_list = historyData.item_list || [];
+
+      logger.info(`轮询状态: status=${status}, failCode=${failCode || '无'}, items=${item_list.length}`);
+
+      if (status === 30) {
+        const error = failCode === 2038
+          ? new APIException(EX.API_CONTENT_FILTERED, "内容被过滤")
+          : new APIException(EX.API_IMAGE_GENERATION_FAILED, `生成失败，错误码: ${failCode}`);
+        error.historyId = historyId;
+        throw error;
+      }
+
+      if (status === 20) {
+        const waitTime = 2000 * Math.min(retryCount + 1, 5);
+        logger.info(`视频生成中，等待 ${waitTime}ms 后继续查询 (${retryCount + 1}/${maxRetries})`);
+        await new Promise((resolve) => setTimeout(resolve, waitTime));
+      }
+
+      retryCount++;
+    } catch (error) {
+      if (error instanceof APIException) throw error;
+      logger.error(`轮询出错: ${error.message}`);
+      retryCount++;
+      await new Promise((resolve) => setTimeout(resolve, 2000 * (retryCount + 1)));
+    }
+  }
+
+  if (retryCount >= maxRetries && status === 20) {
+    const error = new APIException(EX.API_IMAGE_GENERATION_FAILED, "视频生成超时");
+    error.historyId = historyId;
+    throw error;
+  }
+
+  // 尝试获取高质量视频URL
+  const itemId = item_list?.[0]?.item_id
+    || item_list?.[0]?.id
+    || item_list?.[0]?.local_item_id
+    || item_list?.[0]?.common_attr?.id;
+
+  if (itemId) {
+    try {
+      const hqVideoUrl = await fetchHighQualityVideoUrl(String(itemId), refreshToken);
+      if (hqVideoUrl) {
+        logger.info(`视频生成成功（高质量），URL: ${hqVideoUrl}`);
+        return hqVideoUrl;
+      }
+    } catch (error) {
+      logger.warn(`获取高质量视频URL失败: ${error.message}`);
+    }
+  }
+
+  // 回退：提取预览视频URL
+  let videoUrl = item_list?.[0]?.video?.transcoded_video?.origin?.video_url
+    || item_list?.[0]?.video?.play_url
+    || item_list?.[0]?.video?.download_url
+    || item_list?.[0]?.video?.url;
+
+  if (!videoUrl) {
+    const error = new APIException(EX.API_IMAGE_GENERATION_FAILED, "未能获取视频URL");
+    error.historyId = historyId;
+    throw error;
+  }
+
+  logger.info(`视频生成成功，URL: ${videoUrl}`);
+  return videoUrl;
+}
+
+/**
+ * 即时单次查询视频状态（不轮询）
+ * 用于 on-demand 查询：当用户查询一个 processing 任务时，去即梦平台查一次
+ * 如果视频已生成好，直接返回视频URL；否则返回 null
+ *
+ * @param historyId 即梦平台的 history_record_id
+ * @param refreshToken 刷新令牌
+ * @returns 视频URL（已完成）或 null（仍在处理中或失败）
+ */
+async function checkVideoStatusByHistoryId(
+  historyId: string,
+  refreshToken: string
+): Promise<string | null> {
+  try {
+    const result = await request("post", "/mweb/v1/get_history_by_ids", refreshToken, {
+      data: { history_ids: [historyId] },
+    });
+
+    let historyData = result.history_list?.[0] || result[historyId];
+    if (!historyData) {
+      logger.info(`即时查询: 未找到历史记录 historyId=${historyId}`);
+      return null;
+    }
+
+    const status = historyData.status;
+    const failCode = historyData.fail_code;
+    const item_list = historyData.item_list || [];
+
+    logger.info(`即时查询: historyId=${historyId}, status=${status}, failCode=${failCode || '无'}, items=${item_list.length}`);
+
+    // status=20 表示还在处理中
+    if (status === 20) {
+      return null;
+    }
+
+    // status=30 表示生成失败
+    if (status === 30) {
+      logger.warn(`即时查询: 视频生成失败, historyId=${historyId}, failCode=${failCode}`);
+      return null;
+    }
+
+    // status=10 或其他非20值，尝试提取视频URL
+    // 尝试获取高质量视频URL
+    const itemId = item_list?.[0]?.item_id
+      || item_list?.[0]?.id
+      || item_list?.[0]?.local_item_id
+      || item_list?.[0]?.common_attr?.id;
+
+    if (itemId) {
+      try {
+        const hqVideoUrl = await fetchHighQualityVideoUrl(String(itemId), refreshToken);
+        if (hqVideoUrl) {
+          logger.info(`即时查询: 获取高质量视频URL成功, historyId=${historyId}`);
+          return hqVideoUrl;
+        }
+      } catch (error) {
+        logger.warn(`即时查询: 获取高质量视频URL失败: ${error.message}`);
+      }
+    }
+
+    // 回退：提取预览视频URL
+    const videoUrl = item_list?.[0]?.video?.transcoded_video?.origin?.video_url
+      || item_list?.[0]?.video?.play_url
+      || item_list?.[0]?.video?.download_url
+      || item_list?.[0]?.video?.url;
+
+    if (videoUrl) {
+      logger.info(`即时查询: 获取预览视频URL成功, historyId=${historyId}`);
+      return videoUrl;
+    }
+
+    // item_list 非空但无法提取URL，可能还在处理中
+    if (item_list.length === 0) {
+      logger.info(`即时查询: item_list 为空，可能仍在处理, historyId=${historyId}`);
+      return null;
+    }
+
+    logger.warn(`即时查询: item_list 非空但无法提取视频URL, historyId=${historyId}`);
+    return null;
+  } catch (error) {
+    logger.error(`即时查询出错: historyId=${historyId}, ${error.message}`);
+    return null;
+  }
+}
+
+// ========== 异步视频生成任务管理 ==========
+
+// 异步任务状态类型
+type AsyncTaskStatus = "processing" | "succeeded" | "failed";
+
+// 异步任务持久化接口（仅可序列化字段）
+interface AsyncTaskData {
+  taskId: string;
+  status: AsyncTaskStatus;
+  model: string;
+  prompt: string;
+  refreshToken: string;
+  createdAt: number;
+  updatedAt: number;
+  historyId?: string;  // 即梦平台的 history_record_id，用于重启后继续轮询
+  result?: {
+    url?: string;
+    b64_json?: string;
+    revised_prompt?: string;
+  };
+  error?: string;
+}
+
+// 运行时任务接口（含内存中的 Promise 控制器）
+interface AsyncTask extends AsyncTaskData {
+  _resolve?: (value: void) => void;
+  _promise?: Promise<void>;
+}
+
+// 任务存储目录
+const ASYNC_TASK_DIR = path.join(process.cwd(), "tmp", "async-tasks");
+
+// 内存任务映射（从文件加载后使用）
+const asyncTaskStore = new Map<string, AsyncTask>();
+
+// 当前活跃异步任务数
+let activeAsyncCount = 0;
+
+// 最大并发数
+const MAX_ASYNC_CONCURRENCY = 10;
+
+// 任务过期时间（24小时，单位毫秒）
+const TASK_EXPIRY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * 获取任务文件路径
+ */
+function taskFilePath(taskId: string): string {
+  return path.join(ASYNC_TASK_DIR, `${taskId}.json`);
+}
+
+/**
+ * 将任务数据持久化到文件
+ */
+function saveTaskToFile(task: AsyncTask): void {
+  try {
+    const data: AsyncTaskData = {
+      taskId: task.taskId,
+      status: task.status,
+      model: task.model,
+      prompt: task.prompt,
+      refreshToken: task.refreshToken,
+      createdAt: task.createdAt,
+      updatedAt: task.updatedAt,
+      historyId: task.historyId,
+      result: task.result,
+      error: task.error,
+    };
+    fs.writeFileSync(taskFilePath(task.taskId), JSON.stringify(data, null, 2), "utf-8");
+  } catch (err) {
+    logger.error(`保存任务文件失败: ${task.taskId}, ${err.message}`);
+  }
+}
+
+/**
+ * 从文件加载单个任务
+ */
+function loadTaskFromFile(filePath: string): AsyncTaskData | null {
+  try {
+    const raw = fs.readFileSync(filePath, "utf-8");
+    return JSON.parse(raw) as AsyncTaskData;
+  } catch (err) {
+    logger.error(`加载任务文件失败: ${filePath}, ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * 删除任务文件
+ */
+function deleteTaskFile(taskId: string): void {
+  try {
+    const fp = taskFilePath(taskId);
+    if (fs.existsSync(fp)) {
+      fs.unlinkSync(fp);
+    }
+  } catch (err) {
+    logger.error(`删除任务文件失败: ${taskId}, ${err.message}`);
+  }
+}
+
+/**
+ * 启动时从文件恢复所有未完成任务
+ * 恢复 processing 状态的任务并重新执行轮询
+ */
+function restoreTasksFromFiles(): void {
+  try {
+    if (!fs.existsSync(ASYNC_TASK_DIR)) {
+      fs.mkdirSync(ASYNC_TASK_DIR, { recursive: true });
+      return;
+    }
+
+    const files = fs.readdirSync(ASYNC_TASK_DIR).filter(f => f.endsWith(".json"));
+    if (files.length === 0) return;
+
+    logger.info(`发现 ${files.length} 个异步任务文件，开始恢复...`);
+
+    for (const file of files) {
+      const data = loadTaskFromFile(path.join(ASYNC_TASK_DIR, file));
+      if (!data) continue;
+
+      // 跳过已过期的任务
+      if (Date.now() - data.updatedAt > TASK_EXPIRY_MS) {
+        deleteTaskFile(data.taskId);
+        logger.info(`恢复时清理过期任务: ${data.taskId}`);
+        continue;
+      }
+
+      // 已成功/失败的任务直接加载到内存（不占用并发槽位）
+      if (data.status !== "processing") {
+        const task = data as AsyncTask;
+        asyncTaskStore.set(data.taskId, task);
+        logger.info(`恢复已完成任务: ${data.taskId}, 状态: ${data.status}`);
+        continue;
+      }
+
+      // processing 状态的任务：恢复并重启轮询
+      if (activeAsyncCount >= MAX_ASYNC_CONCURRENCY) {
+        logger.warn(`恢复任务 ${data.taskId} 跳过：并发已满 ${activeAsyncCount}/${MAX_ASYNC_CONCURRENCY}`);
+        // 仍加载到内存但不重启轮询，等有槽位时手动查询会触发
+        const task = data as AsyncTask;
+        asyncTaskStore.set(data.taskId, task);
+        continue;
+      }
+
+      const task: AsyncTask = {
+        ...data,
+        _promise: undefined,
+        _resolve: undefined,
+      };
+      // 创建 Promise 并将 resolve 绑定到 task._resolve
+      task._promise = new Promise<void>((resolve) => {
+        task._resolve = resolve;
+      });
+      asyncTaskStore.set(data.taskId, task);
+      activeAsyncCount++;
+      logger.info(`恢复并重启 processing 任务: ${data.taskId}, 当前并发: ${activeAsyncCount}/${MAX_ASYNC_CONCURRENCY}`);
+
+      // 后台重新执行轮询
+      restartPollingForTask(task);
+    }
+
+    logger.info(`任务恢复完成，当前活跃并发: ${activeAsyncCount}/${MAX_ASYNC_CONCURRENCY}`);
+  } catch (err) {
+    logger.error(`恢复任务文件出错: ${err.message}`);
+  }
+}
+
+/**
+ * 为恢复的 processing 任务重启轮询
+ * 使用保存的 historyId 继续轮询，而不是重新提交生成请求
+ * 超时后保持 processing 状态，等用户查询时做 on-demand 查询
+ */
+function restartPollingForTask(task: AsyncTask): void {
+  (async () => {
+    try {
+      if (!task.historyId) {
+        // 没有 historyId，无法恢复轮询，标记为失败
+        task.status = "failed";
+        task.error = "任务缺少 historyId，无法恢复轮询";
+        task.updatedAt = Date.now();
+        saveTaskToFile(task);
+        logger.error(`恢复任务失败: ${task.taskId}, 缺少 historyId`);
+        return;
+      }
+
+      logger.info(`恢复任务轮询: ${task.taskId}, historyId=${task.historyId}`);
+
+      // 使用保存的 historyId 继续轮询
+      const videoUrl = await pollVideoResult(task.historyId, task.refreshToken);
+
+      task.status = "succeeded";
+      task.result = { url: videoUrl, revised_prompt: task.prompt };
+      task.updatedAt = Date.now();
+      saveTaskToFile(task);
+      logger.info(`恢复任务轮询成功: ${task.taskId}`);
+    } catch (error: any) {
+      // 超时错误：保持 processing 状态，不标记为 failed
+      // 用户查询时会通过 on-demand 查询检查即梦平台的最新状态
+      const errorMsg = error?.message || "";
+      if (errorMsg.includes("超时")) {
+        task.updatedAt = Date.now();
+        saveTaskToFile(task); // 保存 historyId，保持 processing
+        logger.warn(`恢复任务轮询超时，保持 processing 状态: ${task.taskId}, historyId=${task.historyId}，等待用户查询时 on-demand 检查`);
+      } else {
+        task.status = "failed";
+        task.error = error instanceof APIException
+          ? `[${error.code}] ${error.message}`
+          : errorMsg || "未知错误";
+        task.updatedAt = Date.now();
+        saveTaskToFile(task);
+        logger.error(`恢复任务轮询失败: ${task.taskId}, ${task.error}`);
+      }
+    } finally {
+      activeAsyncCount--;
+      if (task._resolve) task._resolve();
+    }
+  })();
+}
+
+// 定期清理过期任务文件（每30分钟）
+setInterval(() => {
+  const now = Date.now();
+  for (const [taskId, task] of asyncTaskStore) {
+    if (now - task.updatedAt > TASK_EXPIRY_MS) {
+      asyncTaskStore.delete(taskId);
+      deleteTaskFile(taskId);
+      logger.info(`异步任务已过期清理: ${taskId}`);
+    }
+  }
+}, 30 * 60 * 1000);
+
+// 启动时恢复任务
+restoreTasksFromFiles();
+
+/**
+ * 普通视频生成（内部版，返回 historyId）
+ * 将生成请求和轮询拆分，在获取到 historyId 后立即保存，以便重启恢复
+ */
+async function _generateVideoWithHistoryId(
+  _model: string,
+  prompt: string,
+  options: {
+    ratio?: string;
+    resolution?: string;
+    duration?: number;
+    filePaths?: string[];
+    files?: any[];
+  },
+  refreshToken: string,
+  onHistoryId?: (historyId: string) => void
+): Promise<{ url: string; historyId: string }> {
+  const model = getModel(_model);
+  const { ratio = "1:1", resolution = "720p", duration = 5, filePaths = [], files = [] } = options;
+  const { width, height } = resolveVideoResolution(resolution, ratio);
+
+  logger.info(`异步任务-普通视频: 模型=${_model} 映射=${model} ${width}x${height} (${ratio}@${resolution}) 时长=${duration}秒`);
+
+  // 检查积分
+  const { totalCredit } = await getCredit(refreshToken);
+  if (totalCredit <= 0) await receiveCredit(refreshToken);
+
+  // 处理首帧和尾帧图片
+  let first_frame_image = undefined;
+  let end_frame_image = undefined;
+
+  if (files && files.length > 0) {
+    let uploadIDs: string[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (!file || !file.filepath) continue;
+      try {
+        const buffer = fs.readFileSync(file.filepath);
+        const imageUri = await uploadImageBufferForVideo(buffer, refreshToken);
+        if (imageUri) uploadIDs.push(imageUri);
+      } catch (error) {
+        if (i === 0) throw new APIException(EX.API_REQUEST_FAILED, `首帧文件上传失败: ${error.message}`);
+      }
+    }
+    if (uploadIDs.length === 0) throw new APIException(EX.API_REQUEST_FAILED, '所有文件上传失败');
+    if (uploadIDs[0]) {
+      first_frame_image = { format: "", height, id: util.uuid(), image_uri: uploadIDs[0], name: "", platform_type: 1, source_from: "upload", type: "image", uri: uploadIDs[0], width };
+    }
+    if (uploadIDs[1]) {
+      end_frame_image = { format: "", height, id: util.uuid(), image_uri: uploadIDs[1], name: "", platform_type: 1, source_from: "upload", type: "image", uri: uploadIDs[1], width };
+    }
+  } else if (filePaths && filePaths.length > 0) {
+    let uploadIDs: string[] = [];
+    for (let i = 0; i < filePaths.length; i++) {
+      if (!filePaths[i]) continue;
+      try {
+        const imageUri = await uploadImageForVideo(filePaths[i], refreshToken);
+        if (imageUri) uploadIDs.push(imageUri);
+      } catch (error) {
+        if (i === 0) throw new APIException(EX.API_REQUEST_FAILED, `首帧图片上传失败: ${error.message}`);
+      }
+    }
+    if (uploadIDs.length === 0) throw new APIException(EX.API_REQUEST_FAILED, '所有图片上传失败');
+    if (uploadIDs[0]) {
+      first_frame_image = { format: "", height, id: util.uuid(), image_uri: uploadIDs[0], name: "", platform_type: 1, source_from: "upload", type: "image", uri: uploadIDs[0], width };
+    }
+    if (uploadIDs[1]) {
+      end_frame_image = { format: "", height, id: util.uuid(), image_uri: uploadIDs[1], name: "", platform_type: 1, source_from: "upload", type: "image", uri: uploadIDs[1], width };
+    }
+  }
+
+  const componentId = util.uuid();
+  const metricsExtra = JSON.stringify({
+    "enterFrom": "click", "isDefaultSeed": 1, "promptSource": "custom",
+    "isRegenerate": false, "originSubmitId": util.uuid(),
+  });
+  const draftVersion = MODEL_DRAFT_VERSIONS[_model] || DEFAULT_DRAFT_VERSION;
+  const gcd = (a: number, b: number): number => b === 0 ? a : gcd(b, a % b);
+  const divisor = gcd(width, height);
+  const aspectRatio = `${width / divisor}:${height / divisor}`;
+
+  // 提交生成请求
+  const { aigc_data } = await request("post", "/mweb/v1/aigc_draft/generate", refreshToken, {
+    params: {
+      aigc_features: "app_lip_sync", web_version: "6.6.0", da_version: draftVersion,
+    },
+    data: {
+      "extend": {
+        "root_model": end_frame_image ? MODEL_MAP['jimeng-video-3.0'] : model,
+        "m_video_commerce_info": { benefit_type: "basic_video_operation_vgfm_v_three", resource_id: "generate_video", resource_id_type: "str", resource_sub_type: "aigc" },
+        "m_video_commerce_info_list": [{ benefit_type: "basic_video_operation_vgfm_v_three", resource_id: "generate_video", resource_id_type: "str", resource_sub_type: "aigc" }]
+      },
+      "submit_id": util.uuid(),
+      "metrics_extra": metricsExtra,
+      "draft_content": JSON.stringify({
+        "type": "draft", "id": util.uuid(), "min_version": "3.0.5", "is_from_tsn": true,
+        "version": draftVersion, "main_component_id": componentId,
+        "component_list": [{
+          "type": "video_base_component", "id": componentId, "min_version": "1.0.0",
+          "metadata": { "type": "", "id": util.uuid(), "created_platform": 3, "created_platform_version": "", "created_time_in_ms": Date.now(), "created_did": "" },
+          "generate_type": "gen_video", "aigc_mode": "workbench",
+          "abilities": {
+            "type": "", "id": util.uuid(),
+            "gen_video": {
+              "id": util.uuid(), "type": "",
+              "text_to_video_params": {
+                "type": "", "id": util.uuid(), "model_req_key": model, "priority": 0,
+                "seed": Math.floor(Math.random() * 100000000) + 2500000000,
+                "video_aspect_ratio": aspectRatio,
+                "video_gen_inputs": [{
+                  duration_ms: duration * 1000, first_frame_image, end_frame_image,
+                  fps: 24, id: util.uuid(), min_version: "3.0.5", prompt, resolution, type: "", video_mode: 2
+                }]
+              },
+              "video_task_extra": metricsExtra,
+            }
+          }
+        }],
+      }),
+      http_common_info: { aid: DEFAULT_ASSISTANT_ID },
+    }
+  });
+
+  const historyId = aigc_data.history_record_id;
+  if (!historyId) throw new APIException(EX.API_IMAGE_GENERATION_FAILED, "记录ID不存在");
+
+  logger.info(`异步任务-普通视频: 生成请求已提交, historyId=${historyId}`);
+
+  // 立即通知外部 historyId，确保即使后续轮询超时也能保存
+  if (onHistoryId) onHistoryId(historyId);
+
+  // 轮询获取结果（使用独立的轮询函数）
+  const videoUrl = await pollVideoResult(historyId, refreshToken);
+  return { url: videoUrl, historyId };
+}
+
+/**
+ * Seedance 2.0 视频生成（内部版，返回 historyId）
+ * 将生成请求和轮询拆分，在获取到 historyId 后立即保存，以便重启恢复
+ */
+async function _generateSeedanceVideoWithHistoryId(
+  _model: string,
+  prompt: string,
+  options: {
+    ratio?: string;
+    resolution?: string;
+    duration?: number;
+    filePaths?: string[];
+    files?: any[];
+  },
+  refreshToken: string,
+  onHistoryId?: (historyId: string) => void
+): Promise<{ url: string; historyId: string }> {
+  const model = getModel(_model);
+  const benefitType = SEEDANCE_BENEFIT_TYPE_MAP[_model] || "dreamina_video_seedance_20_pro";
+  const { ratio = "4:3", resolution = "720p", duration = 4, filePaths = [], files = [] } = options;
+  const actualDuration = duration || 4;
+  const { width, height } = resolveVideoResolution(resolution, ratio);
+
+  logger.info(`异步任务-Seedance: 模型=${_model} 映射=${model} ${width}x${height} (${ratio}@${resolution}) 时长=${actualDuration}秒`);
+
+  // 检查积分
+  const { totalCredit } = await getCredit(refreshToken);
+  if (totalCredit <= 0) await receiveCredit(refreshToken);
+
+  // 上传素材（复用 generateSeedanceVideo 中的逻辑）
+  let uploadedMaterials: UploadedMaterial[] = [];
+
+  if (files && files.length > 0) {
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (!file || !file.filepath) continue;
+      const materialType = detectMaterialType(file);
+      try {
+        const buffer = fs.readFileSync(file.filepath);
+        if (materialType === "image") {
+          const imageUri = await uploadImageBufferForVideo(buffer, refreshToken);
+          if (imageUri) uploadedMaterials.push({ type: "image", uri: imageUri, width, height });
+        } else {
+          const vodResult = await uploadMediaForVideo(buffer, materialType, refreshToken, file.originalFilename);
+          uploadedMaterials.push({ type: materialType, vid: vodResult.vid, width: vodResult.width, height: vodResult.height, duration: vodResult.duration, fps: vodResult.fps, name: file.originalFilename || "" });
+        }
+      } catch (error) {
+        if (i === 0) throw new APIException(EX.API_REQUEST_FAILED, `首个文件上传失败: ${error.message}`);
+      }
+    }
+  } else if (filePaths && filePaths.length > 0) {
+    for (let i = 0; i < filePaths.length; i++) {
+      if (!filePaths[i]) continue;
+      const materialType = detectMaterialTypeFromUrl(filePaths[i]);
+      try {
+        if (materialType === "image") {
+          const imageUri = await uploadImageForVideo(filePaths[i], refreshToken);
+          if (imageUri) uploadedMaterials.push({ type: "image", uri: imageUri, width, height });
+        } else {
+          const response = await fetch(filePaths[i]);
+          if (!response.ok) throw new Error(`下载文件失败: ${response.status}`);
+          const buffer = Buffer.from(await response.arrayBuffer());
+          const vodResult = await uploadMediaForVideo(buffer, materialType, refreshToken);
+          uploadedMaterials.push({ type: materialType, vid: vodResult.vid, width: vodResult.width, height: vodResult.height, duration: vodResult.duration, fps: vodResult.fps });
+        }
+      } catch (error) {
+        if (i === 0) throw new APIException(EX.API_REQUEST_FAILED, `首个文件上传失败: ${error.message}`);
+      }
+    }
+  }
+
+  if (uploadedMaterials.length === 0) {
+    throw new APIException(EX.API_REQUEST_FAILED, 'Seedance 2.0 需要至少一个文件');
+  }
+
+  // 构建请求参数（与 generateSeedanceVideo 相同）
+  const hasVideoMaterial = uploadedMaterials.some(m => m.type === "video");
+  const finalBenefitType = hasVideoMaterial ? `${benefitType}_with_video` : benefitType;
+
+  const materialList = uploadedMaterials.map((mat) => {
+    const base = { type: "", id: util.uuid() };
+    if (mat.type === "image") {
+      return { ...base, material_type: "image", image_info: { type: "image", id: util.uuid(), source_from: "upload", platform_type: 1, name: "", image_uri: mat.uri, aigc_image: { type: "", id: util.uuid() }, width: mat.width, height: mat.height, format: "", uri: mat.uri } };
+    } else if (mat.type === "video") {
+      return { ...base, material_type: "video", video_info: { type: "video", id: util.uuid(), source_from: "upload", name: mat.name || "", vid: mat.vid, fps: mat.fps || 0, width: mat.width || 0, height: mat.height || 0, duration: mat.duration || 0 } };
+    } else {
+      return { ...base, material_type: "audio", audio_info: { type: "audio", id: util.uuid(), source_from: "upload", vid: mat.vid, duration: mat.duration || 0, name: mat.name || "" } };
+    }
+  });
+
+  const metaList = buildMetaListFromPrompt(prompt, uploadedMaterials);
+  const componentId = util.uuid();
+  const submitId = util.uuid();
+  const draftVersion = MODEL_DRAFT_VERSIONS[_model] || "3.3.9";
+  const gcd = (a: number, b: number): number => b === 0 ? a : gcd(b, a % b);
+  const divisor = gcd(width, height);
+  const aspectRatio = `${width / divisor}:${height / divisor}`;
+
+  const metricsExtra = JSON.stringify({
+    isDefaultSeed: 1, originSubmitId: submitId, isRegenerate: false, enterFrom: "click",
+    position: "page_bottom_box", functionMode: "omni_reference",
+    sceneOptions: JSON.stringify([{ type: "video", scene: "BasicVideoGenerateButton", modelReqKey: model, videoDuration: actualDuration, reportParams: { enterSource: "generate", vipSource: "generate", extraVipFunctionKey: model, useVipFunctionDetailsReporterHoc: true }, materialTypes: [...new Set(uploadedMaterials.map(m => MATERIAL_TYPE_CODE[m.type]))] }])
+  });
+
+  const token = await acquireToken(refreshToken);
+  const generateQueryParams = new URLSearchParams({
+    aid: String(CORE_ASSISTANT_ID), device_platform: "web", region: "cn",
+    webId: String(WEB_ID), da_version: draftVersion, web_component_open_flag: "1",
+    web_version: "7.5.0", aigc_features: "app_lip_sync",
+  });
+  const generateUrl = `https://jimeng.jianying.com/mweb/v1/aigc_draft/generate?${generateQueryParams.toString()}`;
+  const generateBody = {
+    extend: {
+      root_model: model,
+      m_video_commerce_info: { benefit_type: finalBenefitType, resource_id: "generate_video", resource_id_type: "str", resource_sub_type: "aigc" },
+      m_video_commerce_info_list: [{ benefit_type: finalBenefitType, resource_id: "generate_video", resource_id_type: "str", resource_sub_type: "aigc" }]
+    },
+    submit_id: submitId, metrics_extra: metricsExtra,
+    draft_content: JSON.stringify({
+      type: "draft", id: util.uuid(), min_version: draftVersion, min_features: ["AIGC_Video_UnifiedEdit"],
+      is_from_tsn: true, version: draftVersion, main_component_id: componentId,
+      component_list: [{
+        type: "video_base_component", id: componentId, min_version: "1.0.0", aigc_mode: "workbench",
+        metadata: { type: "", id: util.uuid(), created_platform: 3, created_platform_version: "", created_time_in_ms: String(Date.now()), created_did: "" },
+        generate_type: "gen_video",
+        abilities: {
+          type: "", id: util.uuid(),
+          gen_video: {
+            type: "", id: util.uuid(),
+            text_to_video_params: {
+              type: "", id: util.uuid(),
+              video_gen_inputs: [{
+                type: "", id: util.uuid(), min_version: draftVersion, prompt: "", video_mode: 2, fps: 24,
+                duration_ms: actualDuration * 1000, idip_meta_list: [],
+                unified_edit_input: { type: "", id: util.uuid(), material_list: materialList, meta_list: metaList }
+              }],
+              video_aspect_ratio: aspectRatio, seed: Math.floor(Math.random() * 1000000000), model_req_key: model, priority: 0
+            },
+            video_task_extra: metricsExtra
+          }
+        },
+        process_type: 1
+      }]
+    }),
+    http_common_info: { aid: CORE_ASSISTANT_ID },
+  };
+
+  logger.info(`异步任务-Seedance: 通过浏览器代理发送 generate 请求...`);
+  const generateResult = await browserService.fetch(token, generateUrl, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(generateBody),
+  });
+
+  const { ret, errmsg, data: generateData } = generateResult;
+  if (ret !== undefined && Number(ret) !== 0) {
+    if (Number(ret) === 5000) {
+      throw new APIException(EX.API_IMAGE_GENERATION_INSUFFICIENT_POINTS, `[无法生成视频]: 即梦积分可能不足，${errmsg}`);
+    }
+    throw new APIException(EX.API_REQUEST_FAILED, `[请求jimeng失败]: ${errmsg}`);
+  }
+  const aigc_data = generateData?.aigc_data || generateResult.aigc_data;
+  const historyId = aigc_data.history_record_id;
+  if (!historyId) throw new APIException(EX.API_IMAGE_GENERATION_FAILED, "记录ID不存在");
+
+  logger.info(`异步任务-Seedance: 生成请求已提交, historyId=${historyId}`);
+
+  // 立即通知外部 historyId，确保即使后续轮询超时也能保存
+  if (onHistoryId) onHistoryId(historyId);
+
+  // 轮询获取结果（使用独立的轮询函数）
+  const videoUrl = await pollVideoResult(historyId, refreshToken);
+  return { url: videoUrl, historyId };
+}
+
+/**
+ * 提交异步视频生成任务
+ * 调用生成接口后立即返回 taskId，后台执行轮询等待视频生成完成
+ */
+export function submitAsyncVideoTask(
+  model: string,
+  prompt: string,
+  options: {
+    ratio?: string;
+    resolution?: string;
+    duration?: number;
+    filePaths?: string[];
+    files?: any[];
+  },
+  refreshToken: string
+): string {
+  if (activeAsyncCount >= MAX_ASYNC_CONCURRENCY) {
+    throw new APIException(
+      EX.API_REQUEST_FAILED,
+      `当前异步任务并发数已达上限 (${MAX_ASYNC_CONCURRENCY})，请稍后重试`
+    );
+  }
+
+  // 确保任务目录存在
+  if (!fs.existsSync(ASYNC_TASK_DIR)) {
+    fs.mkdirSync(ASYNC_TASK_DIR, { recursive: true });
+  }
+
+  const taskId = util.uuid();
+  const task: AsyncTask = {
+    taskId,
+    status: "processing",
+    model,
+    prompt,
+    refreshToken,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  // 创建用于查询接口阻塞等待的 Promise
+  task._promise = new Promise<void>((resolve) => {
+    task._resolve = resolve;
+  });
+
+  asyncTaskStore.set(taskId, task);
+  saveTaskToFile(task);
+  activeAsyncCount++;
+  logger.info(
+    `异步任务已创建: ${taskId}, 模型: ${model}, 当前并发: ${activeAsyncCount}/${MAX_ASYNC_CONCURRENCY}`
+  );
+
+  // 后台执行视频生成（含轮询）
+  (async () => {
+    try {
+      let videoUrl: string;
+      if (isSeedanceModel(model)) {
+        const seedanceDuration =
+          options.duration === 5 ? 4 : options.duration;
+        const seedanceRatio =
+          options.ratio === "1:1" ? "4:3" : options.ratio;
+
+        // 使用 Seedance 生成：先生成获取 historyId，通过回调立即保存，然后再轮询
+        const { url } = await _generateSeedanceVideoWithHistoryId(
+          model, prompt, {
+            ratio: seedanceRatio,
+            resolution: options.resolution,
+            duration: seedanceDuration,
+            filePaths: options.filePaths,
+            files: options.files,
+          }, refreshToken,
+          // onHistoryId 回调：在获取到 historyId 后立即保存到 task 文件
+          (historyId) => {
+            task.historyId = historyId;
+            saveTaskToFile(task);
+            logger.info(`异步任务-Seedance: historyId 已保存, ${taskId} -> ${historyId}`);
+          }
+        );
+
+        videoUrl = url;
+      } else {
+        // 普通视频生成：先生成获取 historyId，通过回调立即保存，然后再轮询
+        const { url } = await _generateVideoWithHistoryId(
+          model, prompt, {
+            ratio: options.ratio,
+            resolution: options.resolution,
+            duration: options.duration,
+            filePaths: options.filePaths,
+            files: options.files,
+          }, refreshToken,
+          // onHistoryId 回调：在获取到 historyId 后立即保存到 task 文件
+          (historyId) => {
+            task.historyId = historyId;
+            saveTaskToFile(task);
+            logger.info(`异步任务-普通视频: historyId 已保存, ${taskId} -> ${historyId}`);
+          }
+        );
+
+        videoUrl = url;
+      }
+
+      task.status = "succeeded";
+      task.result = {
+        url: videoUrl,
+        revised_prompt: prompt,
+      };
+      task.updatedAt = Date.now();
+      saveTaskToFile(task);
+      logger.info(`异步任务成功: ${taskId}, 视频URL: ${videoUrl}`);
+    } catch (error: any) {
+      const errorMsg = error?.message || "";
+
+      // 超时错误：保持 processing 状态，保存 historyId
+      // 用户查询时会通过 on-demand 查询检查即梦平台最新状态
+      if (errorMsg.includes("超时")) {
+        task.updatedAt = Date.now();
+        saveTaskToFile(task); // 保存 historyId，保持 processing
+        logger.warn(`异步任务后台轮询超时，保持 processing 状态: ${taskId}, historyId=${task.historyId}，等待用户查询时 on-demand 检查`);
+      } else {
+        task.status = "failed";
+        task.error = error instanceof APIException
+          ? `[${error.code}] ${error.message}`
+          : errorMsg || "未知错误";
+        task.updatedAt = Date.now();
+        saveTaskToFile(task);
+        logger.error(`异步任务失败: ${taskId}, 错误: ${task.error}`);
+      }
+    } finally {
+      activeAsyncCount--;
+      // 通知查询接口任务已完成（succeeded/failed），或后台轮询已停止（超时保持processing）
+      if (task._resolve) {
+        task._resolve();
+      }
+    }
+  })();
+
+  return taskId;
+}
+
+/**
+ * 查询异步视频生成任务结果
+ * - 如果后台轮询仍在进行中（有 _promise），阻塞等待完成
+ * - 如果后台轮询已停止但任务仍为 processing（超时场景），做 on-demand 即时查询
+ */
+export async function queryAsyncVideoTask(
+  taskId: string
+): Promise<AsyncTask> {
+  // 先从内存查找
+  let task = asyncTaskStore.get(taskId);
+
+  // 内存中没有，尝试从文件加载
+  if (!task) {
+    const fp = taskFilePath(taskId);
+    if (!fs.existsSync(fp)) {
+      throw new APIException(
+        EX.API_REQUEST_PARAMS_INVALID,
+        `任务ID不存在或已过期: ${taskId}`
+      );
+    }
+    const data = loadTaskFromFile(fp);
+    if (!data) {
+      throw new APIException(
+        EX.API_REQUEST_PARAMS_INVALID,
+        `任务数据损坏: ${taskId}`
+      );
+    }
+    task = data as AsyncTask;
+    asyncTaskStore.set(taskId, task);
+    logger.info(`从文件加载任务: ${taskId}, 状态: ${task.status}`);
+  }
+
+  // 已终态的任务直接返回
+  if (task.status === "succeeded" || task.status === "failed") {
+    return task;
+  }
+
+  // processing 状态的任务
+  if (task.status === "processing") {
+    // 如果后台轮询仍在进行中（有活跃的 Promise），阻塞等待
+    if (task._promise) {
+      logger.info(`查询接口等待后台轮询完成: ${taskId}`);
+      await task._promise;
+      return task;
+    }
+
+    // 后台轮询已停止（超时或重启后的 processing 任务），做 on-demand 即时查询
+    if (task.historyId) {
+      logger.info(`on-demand 即时查询: ${taskId}, historyId=${task.historyId}`);
+      const videoUrl = await checkVideoStatusByHistoryId(task.historyId, task.refreshToken);
+
+      if (videoUrl) {
+        // 视频已生成好！更新任务状态
+        task.status = "succeeded";
+        task.result = { url: videoUrl, revised_prompt: task.prompt };
+        task.updatedAt = Date.now();
+        saveTaskToFile(task);
+        logger.info(`on-demand 查询发现视频已完成: ${taskId}, URL: ${videoUrl}`);
+      } else {
+        // 仍在处理中，保持 processing
+        logger.info(`on-demand 查询: 视频仍在处理中, ${taskId}`);
+      }
+    } else {
+      logger.warn(`processing 任务缺少 historyId，无法 on-demand 查询: ${taskId}`);
+    }
+  }
+
+  return task;
 }
