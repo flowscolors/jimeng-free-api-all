@@ -967,7 +967,7 @@ Authorization: Bearer sessionid1,sessionid2,sessionid3
 
 欢迎加入技术交流群，分享使用心得：
 
-![image-20260329234446858](https://mypicture-1258720957.cos.ap-nanjing.myqcloud.com/Obsidian/image-20260329234446858.png)
+![3997221ab09d03a09a4e0689c2101c20_compress](https://mypicture-1258720957.cos.ap-nanjing.myqcloud.com/3997221ab09d03a09a4e0689c2101c20_compress.jpg)
 
 ## 作者联系
 
