@@ -32,3 +32,9 @@ curl(nodejs)-seedance2.0fast.txt
 curl(nodejs)-seedance2.0fast+声音.txt
 curl(nodejs)-seedance2.0fast+声音2.txt
 .ipynb_checkpoints/curl(node.js)_jimeng-5.0lite-checkpoint.txt
+# Test data
+hk-tokens.json
+# OMC
+.omc/
+# Claude local settings
+.claude/
